@@ -1,0 +1,67 @@
+// قواعد Firestore — المرحلة 2 (قسطاس)
+// ⚠️ لا تنشرها قبل ما تتبع الخطوات اللي في الرسالة (حساب الأدمن + مستند admins + تجربة في Rules Playground).
+// الفكرة: بيانات اللي اتحوّل لـ Firebase Auth (authMigrated=true) بتتقفل عليه هو فقط، واللي لسه ما اتحوّلش بيفضل شغال زي ما هو.
+// للرجوع: من تبويب Rules اضغط «Rules history» واختر القواعد القديمة (allow read, write: if true) وانشرها.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function authed() { return request.auth != null && request.auth.token.email != null; }
+    function digits(uid) { return uid.replace('user_', ''); }
+    function isOwner(uid) { return authed() && request.auth.token.email == digits(uid) + '@qistas.app'; }
+    function isAdmin() { return authed() && exists(/databases/$(database)/documents/admins/$(request.auth.token.email)); }
+    function legacy(uid) {
+      return !exists(/databases/$(database)/documents/users/$(uid))
+        || get(/databases/$(database)/documents/users/$(uid)).data.get('authMigrated', false) != true;
+    }
+    function touches(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasAny(keys); }
+
+    match /users/{uid} {
+      allow get: if isOwner(uid) || legacy(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(uid) || isAdmin() || (legacy(uid) && !('authMigrated' in request.resource.data));
+      allow update: if isAdmin()
+                    || (isOwner(uid) && !touches(['subscription', 'blocked', 'features']))
+                    || (legacy(uid) && !touches(['authMigrated']));
+      allow delete: if isAdmin();
+
+      match /{sub}/{doc=**} {
+        allow read, write: if isOwner(uid) || legacy(uid) || isAdmin();
+      }
+    }
+
+    // سؤال تذكير كلمة المرور (لازم يتقرا قبل الدخول)
+    match /hints/{uid} {
+      allow get: if true;
+      allow create, update: if isOwner(uid) || legacy(uid) || isAdmin();
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
+    match /config/{docId} {
+      allow read: if docId != 'admin' || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /updates/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /activation_codes/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    match /support_tickets/{id} {
+      allow create: if request.resource.data.uid is string;
+      allow read, update: if isAdmin()
+        || (authed() && resource.data.uid == 'user_' + request.auth.token.email.split('@')[0]);
+      allow delete: if isAdmin();
+    }
+
+    // حسابات الأدمن: تنشئ المستند يدويًا من الكونسول، اسمه = إيميل الأدمن
+    match /admins/{email} {
+      allow get: if authed() && request.auth.token.email == email;
+      allow list, write: if false;
+    }
+  }
+}
