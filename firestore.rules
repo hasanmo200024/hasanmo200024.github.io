@@ -1,0 +1,92 @@
+// قواعد Firestore — النظام الجديد (حسابات acc_<رقم الهاتف> بكود 8 أرقام)
+// ⚠️ مفيش حاجة هنا بتتنشر لوحدها. انسخها في تبويب Rules، جرّبها في Rules Playground، وبعدين انشر.
+// للرجوع: من «Rules history» اختر القواعد القديمة وانشرها.
+//
+// الفكرة:
+//  - كل عميل ليه مستند users/acc_<رقم الهاتف> وفيه ownerEmail (إيميل Firebase Auth بتاعه).
+//  - بيانات العميل (users/{uid}/**) مقفولة على صاحب الإيميل ده + الأدمن بس.
+//  - الأدمن لما يديه كود جديد بيغيّر ownerEmail لإيميل جديد، فالكود القديم بيتلغي.
+//  - الحسابات القديمة (user_*) مقفولة تمامًا على الأدمن بس.
+//
+// اختبارات Rules Playground المقترحة (كلها لازم تتحقق):
+//  1) get users/acc_201012345678 بإيميل 201012345678@acc.qistas.app (والمستند ownerEmail بتاعه نفس الإيميل) ← مسموح.
+//  2) نفس القراءة بإيميل 201099999999@acc.qistas.app ← مرفوض.
+//  3) get users/user_2001010916827 (قديم) من غير admin ← مرفوض.
+//  4) list users بدون admin ← مرفوض.
+//  5) get loginmap/201012345678 من غير تسجيل دخول ← مسموح، وlist loginmap ← مرفوض.
+//  6) write loginmap/* أو device_unlocks/* بدون admin ← مرفوض.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function authed() { return request.auth != null && request.auth.token.email != null; }
+    function isAdmin() { return authed() && exists(/databases/$(database)/documents/admins/$(request.auth.token.email)); }
+    function isAcc(uid) { return uid.matches('acc_[0-9]+'); }
+    function ownerOf(uid) { return get(/databases/$(database)/documents/users/$(uid)).data.get('ownerEmail', ''); }
+    function isOwner(uid) {
+      return authed() && isAcc(uid)
+        && exists(/databases/$(database)/documents/users/$(uid))
+        && request.auth.token.email == ownerOf(uid);
+    }
+    function touches(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasAny(keys); }
+
+    match /users/{uid} {
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+      // أول إنشاء: صاحب الرقم هو اللي بيسجّل الإيميل المشتق من رقمه
+      allow create: if isAdmin()
+        || (authed() && isAcc(uid)
+            && request.auth.token.email == uid.replace('acc_', '') + '@acc.qistas.app'
+            && request.resource.data.ownerEmail == request.auth.token.email);
+      allow update: if isAdmin()
+        || (isOwner(uid) && !touches(['subscription', 'blocked', 'features', 'ownerEmail', 'lockResetAt', 'failedLogins']));
+      allow delete: if isAdmin();
+
+      match /{sub}/{doc=**} {
+        allow read, write: if isOwner(uid) || isAdmin();
+      }
+    }
+
+    // إيميل الدخول الحالي للرقم (بيتغيّر لما الأدمن يديه كود جديد). قراءة بالمعرّف فقط.
+    match /loginmap/{digits} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if isAdmin();
+    }
+
+    // فك قفل الجهاز أو الحساب (المعرّف عشوائي أو acc_رقم). قراءة بالمعرّف فقط.
+    match /device_unlocks/{id} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if isAdmin();
+    }
+
+    match /support_tickets/{id} {
+      allow create: if request.resource.data.keys().size() < 25
+        && (request.resource.data.get('uid', null) == null || request.resource.data.uid is string);
+      allow read, update: if isAdmin()
+        || (authed() && resource.data.get('uid', '') == 'acc_' + request.auth.token.email.split('[.@]')[0]);
+      allow delete: if isAdmin();
+    }
+
+    match /config/{docId} {
+      allow read: if docId != 'admin' || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /updates/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /activation_codes/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    // حسابات الأدمن: المستند اسمه = إيميل الأدمن (بيتعمل يدويًا من الكونسول)
+    match /admins/{email} {
+      allow get: if authed() && request.auth.token.email == email;
+      allow list, write: if false;
+    }
+  }
+}
